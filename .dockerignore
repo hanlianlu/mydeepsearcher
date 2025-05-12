@@ -1,0 +1,97 @@
+# ----------------------------------------
+# Source control
+# ----------------------------------------
+.git
+.gitignore
+
+# ----------------------------------------
+# Python artifacts
+# ----------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.whl
+
+# ----------------------------------------
+# Virtual envs & local config
+# ----------------------------------------
+.env
+.venv/
+env/
+venv/
+ENV/
+.env.*
+
+# Poetry / PDM / Pipenv
+poetry.lock
+pdm.lock
+Pipfile
+Pipfile.lock
+poetry.toml
+
+# ----------------------------------------
+# IDE / Editor
+# ----------------------------------------
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+.history/
+
+# ----------------------------------------
+# System files
+# ----------------------------------------
+.DS_Store
+Thumbs.db
+
+# ----------------------------------------
+# Local data & caches
+# ----------------------------------------
+*.db
+milvus_data/
+volumes/
+tests/test_data/
+evaluation/eval_output/
+
+# ----------------------------------------
+# Streamlit / notebook
+# ----------------------------------------
+.ipynb_checkpoints/
+*.ipynb
+
+# ----------------------------------------
+# Containers / Kubernetes
+# ----------------------------------------
+docker-compose*.yml
+*.stack.yml
+*.kubeconfig
+
+# ----------------------------------------
+# Logs, temp & report
+# ----------------------------------------
+*.log
+*.tmp
+*.cache
+htmlcov/
+.tox/
+.coverage
+coverage.xml
+
+# ----------------------------------------
+# Include only what you need:
+#   deep-searcher/, deep_searcher_chat/, 
+#   load_azure_private_data.py, handlers.py, 
+#   query_stream.py, app.py, requirements.txt, Dockerfile
+# ----------------------------------------
+!deep-searcher/**
+!deep_searcher_chat/**
+!load_azure_private_data.py
+!handlers.py
+!query_stream.py
+!app.py
+!requirements.txt
+!Dockerfile

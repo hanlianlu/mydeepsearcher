@@ -1,0 +1,65 @@
+import tkinter as tk
+from tkinter import filedialog
+import matplotlib.pyplot as plt
+import pandas as pd
+import ast
+import os
+
+# Initialize tkinter
+root = tk.Tk()
+root.withdraw()  # Hide the main window
+
+# Open file dialog to select CSV or Excel file
+file_path = filedialog.askopenfilename(
+    title="Select CSV or Excel File",
+    filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx")]
+)
+
+if not file_path:
+    print("No file selected. Exiting.")
+    exit()
+
+# Determine file type and read the file
+file_extension = os.path.splitext(file_path)[1].lower()
+if file_extension == ".csv":
+    df = pd.read_csv(file_path)
+elif file_extension == ".xlsx":
+    df = pd.read_excel(file_path)
+else:
+    print("Unsupported file type. Please select a CSV or Excel file.")
+    exit()
+
+# Check for required columns
+required_columns = ["idx", "recall", "recall_naive"]
+if not all(col in df.columns for col in required_columns):
+    print(f"Missing required columns. Expected: {required_columns}")
+    exit()
+
+# Parse the dictionary strings in "recall" and "recall_naive" columns
+try:
+    df['recall_dict'] = df['recall'].apply(lambda x: ast.literal_eval(x))
+    df['recall_naive_dict'] = df['recall_naive'].apply(lambda x: ast.literal_eval(x))
+except Exception as e:
+    print(f"Error parsing recall columns: {e}")
+    exit()
+
+# Extract Recall@5 values (assuming k=5 is present)
+df['recall@5'] = df['recall_dict'].apply(lambda x: x.get(5, 0.0))
+df['recall_naive@5'] = df['recall_naive_dict'].apply(lambda x: x.get(5, 0.0))
+
+# Create the line chart
+plt.figure(figsize=(10, 6))  # Set figure size
+plt.plot(df['idx'], df['recall@5'], marker='o', label='DeepSearcher Recall@5', color='blue')
+plt.plot(df['idx'], df['recall_naive@5'], marker='s', label='Naive RAG Recall@5', color='green')
+
+# Customize the chart
+plt.title('Question Index vs Recall@5', fontsize=14)
+plt.xlabel('Question Index', fontsize=12)
+plt.ylabel('Recall@5', fontsize=12)
+plt.legend(loc='best')  # Add legend
+plt.grid(True)  # Add grid lines
+plt.xticks(df['idx'])  # Set x-axis ticks to match question indices
+plt.ylim(0, 1.05)  # Set y-axis limits from 0 to slightly above 1
+
+# Display the plot
+plt.show()

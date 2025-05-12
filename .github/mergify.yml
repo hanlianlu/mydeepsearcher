@@ -1,0 +1,34 @@
+misc:
+  - branch: &BRANCHES
+      #  In this pull request, the changes are based on the main branch
+      - &MASTER_BRANCH base=main
+          
+  - name: Label bug fix PRs
+    conditions:
+      # branch condition: in this pull request, the changes are based on any branch referenced by BRANCHES
+      - or: *BRANCHES
+      - 'title~=^fix:'
+    actions:
+      label:
+        add:
+          - kind/bug
+
+  - name: Label feature PRs
+    conditions:
+      # branch condition: in this pull request, the changes are based on any branch referenced by BRANCHES
+      - or: *BRANCHES
+      - 'title~=^feat:'
+    actions:
+      label:
+        add:
+          - kind/feature
+  
+  - name: Label enhancement PRs
+    conditions:
+      # branch condition: in this pull request, the changes are based on any branch referenced by BRANCHES
+      - or: *BRANCHES
+      - 'title~=^enhance:'
+    actions:
+      label:
+        add:
+          - kind/enhancement

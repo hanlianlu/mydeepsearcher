@@ -1,0 +1,75 @@
+provide_settings:
+  llm:
+    provider: "AzureOpenAI"
+    config:
+      model: "o3-mini"
+      reasoning_effort: "medium"
+      api_version: "2024-12-01-preview"
+      azure_endpoint: "https://pmoopenai.openai.azure.com/"
+      api_key: ""
+
+  backupllm:
+    provider: "AzureOpenAI"
+    config:
+      model: "o4-mini"
+      reasoning_effort: "high"
+      api_version: "2024-12-01-preview"
+      azure_endpoint: "https://pmoopenai.openai.azure.com/"
+      api_key: ""
+
+  embedding:
+    provider: "OpenAIEmbedding"
+    config:
+      model: "text-embedding-3-large"
+      api_key: ""
+      base_url: "https://pmoopenai.openai.azure.com/"
+      dimension: 3072
+  
+  lightllm:
+    provider: "AzureOpenAI"
+    config:
+      model: "gpt-4.1"
+      api_version: "2024-12-01-preview"
+      azure_endpoint: "https://pmoopenai.openai.azure.com/"
+      api_key: ""
+
+  nanollm:
+    provider: "AzureOpenAI"
+    config:
+      model: "gpt-4.1-mini"
+      api_version: "2024-12-01-preview"
+      azure_endpoint: "https://pmoopenai.openai.azure.com/"
+      api_key: ""
+
+  file_loader:
+    provider: "PDFLoader"
+    config: {}
+
+  web_crawler:
+    provider: "DsCrawler"
+    config:
+      # follow one extra hop (PDFs + HTML) on same domain
+      max_depth: 2
+      # stop completely after 40 fetched pages
+      max_pages: 30
+      link_policy:
+        follow_types: ["pdf", "html"]        # keep both
+        same_domain_only: false               # stay on seed domain
+
+  vector_db:
+    provider: "Milvus"
+    config:
+      default_collection: "default"
+      host: "localhost"
+      port: "19530"
+
+  search_service:
+    provider: "DuckDuckGoSearchService"
+    config: {}
+
+query_settings:
+  max_iter: 5
+
+load_settings:
+  chunk_size: 3000
+  chunk_overlap: 280
