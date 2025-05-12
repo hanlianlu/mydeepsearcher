@@ -44,7 +44,8 @@ pip install -e .
 Prepare your `KEYS, END_POINTS, etc.` by creating '.env' file according to 'template_env.md'
 
 #### Install Milvus Standalone version and run:
-```sudo docker compose up -d
+```
+sudo docker compose up -d
 sudo docker compose down (close)
 sudo docker compose ps (check)
 ```
@@ -69,3 +70,5 @@ Ensure the VM’s firewall (e.g., UFW) and Azure Network Security Group allow tr
 • Add SSH_PRIVATE_KEY (optional)
 • Enable identity to system managed identity
 • Set configuration start command with:[bash startup.sh]
+
+
