@@ -361,3 +361,4 @@ yarg==0.1.10
 yarl==1.18.3
 zipp==3.21.0
 zstandard==0.23.0
+pyautogen>=0.5.6
