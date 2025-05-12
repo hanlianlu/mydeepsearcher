@@ -28,46 +28,44 @@ This project is most suitable for enterprise knowledge management, intelligent Q
 ### Clone the repository
 git clone https://github.com/hanlianlu/mydeepsearcher.git
 
-### MAKE SURE the python version is greater than or equal to 3.12.3
+### MAKE SURE the python version is >= 3.12.3 for Mac/Linux, for WINDOWS == 3.11.9 .
 ### Recommended: Create a Python virtual environment
+```
 cd deep-searcher
 python3 -m venv .venv
 source .venv/bin/activate
 
 ### Install dependencies, this could lead to non-prod runnable, remember to remove related info in requirements when integrating to prod.
 pip install -e .
-
+```
 
 ### -----------------------------------DEVELOPMENT USAGE-----------------------
 
-Prepare your `KEYS, END_POINTS, etc.` by creating '.env' file according to template_env.md
+Prepare your `KEYS, END_POINTS, etc.` by creating '.env' file according to 'template_env.md'
 
 #### Install Milvus Standalone version and run:
-sudo docker compose up -d
+```sudo docker compose up -d
 sudo docker compose down (close)
 sudo docker compose ps (check)
+```
 #### Run App for User usage:
+```
 cd to deep_searcher_chat directory:
 streamlit run prod_app.py
+```
 
 
 ### ------------------------------------PRODUCTION USAGE------------------------
 
 
 #### Production usage on VM (optional):
-Ensure the VM’s firewall (e.g., UFW) and Azure Network Security Group allow traffic on port 8501, 19530, 9091,8000
+Ensure the VM’s firewall (e.g., UFW) and Azure Network Security Group allow traffic on port `8501, 19530, 9091, 8000`
 
 #### Production usage on GIthub Actions workflow-file configuration (optional):
-• Ensure Github Action workflow-file has: [runs-on: ubuntu-latest] 
+• Ensure Github Action workflow-file has: `[runs-on: ubuntu-latest]` IF under enterprise network, check with ADMIN for dedicated `runs-on`
 
 #### Production usage on Azure Web App Service:
-• Add Environment variables according to template_env.md  
+• Add Environment variables according to `template_env.md`
 • Add SSH_PRIVATE_KEY (optional)
 • Enable identity to system managed identity
 • Set configuration start command with:[bash startup.sh]
-
-
-
-
-
-
