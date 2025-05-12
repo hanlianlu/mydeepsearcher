@@ -13,14 +13,88 @@ from deepsearcher.vector_db.base import BaseVectorDB, deduplicate_results
 from deepsearcher import configuration
 from deepsearcher.agent.final_paper import FinalPaperAgent
 
-from deepsearcher.utils.rag_helpers import format_retrieved_results, parse_rerank_response, confidence_prompt
+# Prompts (unchanged from original)
+SUB_QUERY_PROMPT = """To comprehensively answer the original question, follow these instructions:
 
-from deepsearcher.utils.rag_prompts import (
-    SUB_QUERY_PROMPT, 
-    RERANK_PROMPT,
-    REFLECT_PROMPT,
-    SUMMARY_PROMPT
-)
+1. Break down the original question into up to four sub-questions. Return as list of str.
+2. Identify and interpret any acronyms or abbreviations present in the original question. If the meaning is uncertain, provide your best possible interpretation, you may form sub-questions to verify your interpretation.
+3. If the history context is of relevance, put the relevant part into consideration altogether when you breakdown the original question.
+4. If this is a very simple question and no decomposition is necessary, then just keep the original question in the python list.
+
+Return your final result as a Python list of strings, with each sub-question clearly formulated and self-contained.
+
+Original Question: {original_query}
+History Context:   {history_context} 
+
+<EXAMPLE>
+Example input:
+Original Question: "Explain deep learning"
+History Context :"User: I'm new to Machine Learning, please suggest me a good starting course. AI: I recommend you take Machine Learning course from Andrew Ng as starter."
+
+Example output:
+[
+    "What is deep learning?",
+    "What is the difference between deep learning and machine learning?",
+    "What is the history of deep learning?",
+    "Does Andrew Ng provide a deep learning course, and is it also worthy for a beginner?"
+]
+</EXAMPLE>
+
+Provide your response in a python list of str format:
+"""
+
+RERANK_PROMPT = """Based on the original query, sub-queries, and the retrieved chunks, determine for each chunk whether it is helpful in answering any of the queries and assign a relevance score between 0.00 and 1.00. 
+Ensure scores are floats with double precision between 0.00 and 1.00.
+When scoring relevance, apply a small positive bias to the original query so it edges out each secondary sub-query, but keep the weighing difference subtle rather than dominant.
+
+Original Query: {original_query}
+Sub-Queries: {sub_queries}
+Retrieved Chunks: {retrieved_chunk}
+
+Respond with a JSON list of lists, where each inner list corresponds to a chunk in the order provided and ONLY has the format ["YES"/"NO", score], e.g., [["YES", 0.91], ["NO", 0.22]] for two chunks. 
+Ensure strings are quoted.
+"""
+
+REFLECT_PROMPT = """Determine whether additional search queries are needed based on the original query, previous sub queries, and the retrieved document chunks. If further research is required, provide a Python list of up to 3 search queries. If no further research is required, return an empty list.
+
+Original Query: {question}
+
+Previous Sub Queries: {mini_questions}
+
+Retrieved Chunks: {chunk_str}
+
+Respond exclusively in valid List of str format without any other text."""
+
+SUMMARY_PROMPT = """
+You are an AI content analysis expert, excellent at summarizing, analyzing content and providing insights and proposals. 
+Please produce your final answer **in Markdown format**, observing these rules:
+1. **Headings**  
+   - Use `#`, `##`, `###`, etc. to structure major sections.
+2. **Bullet lists**  
+   - Use `-` or `*` for unordered lists, and `1., 2., 3., …` for ordered lists.
+3. **Tables**  
+   - Any tabular data must be formatted as a pipe‑delimited Markdown table with a header row and separator line.
+4. **Code snippets**  
+   - Use triple backticks (```) for any code or example commands.
+5. **Emphasis**  
+   - Use `**bold**` or `*italic*` where appropriate.
+6. **Links and images**  
+   - If referencing URLs or images, use standard Markdown syntax: `[text](url)` or `![alt](url)`.
+Please summarize a specific and detailed answer or report based on the previous queries and the retrieved document chunks. You may then provide professional proposals and insights more extensively.
+You may consider history contexts from user's previous conversation for reference.
+Please evaluate and synthesize information from ALL of these chunks and docs to form your final answer to the user's query.
+If the original query is simple or trivial, you should just answer concisely.
+
+Original Query: {question}
+
+Previous Sub Queries: {mini_questions}
+
+Related Chunks: 
+{mini_chunk_str}
+
+History Contexts:
+{history_context}
+"""
 
 @describe_class(
     "DeepSearch is the ultimate all-purpose agent, designed to handle the vast majority of your queries with unmatched depth and flexibility. "
@@ -92,7 +166,7 @@ class DeepSearch(RAGAgent):
         accepted_results_with_scores = []
         for start in range(0, len(chunks), batch_size):
             batch = chunks[start:start + batch_size]
-            batch_formatted = format_retrieved_results(batch)
+            batch_formatted = self._format_retrieved_results(batch)
             prompt = RERANK_PROMPT.format(original_query=original_query, sub_queries=", ".join(sub_queries), retrieved_chunk=batch_formatted)
             chat_response = await self.llm.chat_async([{"role": "user", "content": prompt}])
             try:
@@ -126,7 +200,7 @@ class DeepSearch(RAGAgent):
         return accepted_results
 
     async def _generate_gap_queries(self, original_query: str, all_sub_queries: List[str], all_chunks: List[RetrievalResult]) -> List[str]:
-        chunk_str = format_retrieved_results(all_chunks) if all_chunks else "No chunks retrieved."
+        chunk_str = self._format_retrieved_results(all_chunks) if all_chunks else "No chunks retrieved."
         prompt = REFLECT_PROMPT.format(question=original_query, mini_questions=", ".join(all_sub_queries), chunk_str=chunk_str)
         chat_response = await self.llm.chat_async([{"role": "user", "content": prompt}])
         gap_queries = self.llm.literal_eval(chat_response.content)
@@ -136,7 +210,7 @@ class DeepSearch(RAGAgent):
         return gap_queries
 
     async def _assess_confidence(self, original_query: str, all_sub_queries: List[str], all_chunks: List[RetrievalResult]) -> float:
-        chunk_str = format_retrieved_results(all_chunks) if all_chunks else "No chunks retrieved."
+        chunk_str = self._format_retrieved_results(all_chunks) if all_chunks else "No chunks retrieved."
         confidence_prompt = (
             "Based on the original query, previous sub-queries, and the retrieved chunks, assess your confidence (as a number between 0 and 1) that you have enough information to answer the query comprehensively with profound insights.\n\n"
             "Original Query: {original_query}\n"
@@ -237,7 +311,7 @@ class DeepSearch(RAGAgent):
                 summary_prompt = SUMMARY_PROMPT.format(
                     question=query,
                     mini_questions="; ".join(additional_info.get("all_sub_queries", [])),
-                    mini_chunk_str=format_retrieved_results(all_retrieved_results),
+                    mini_chunk_str=self._format_retrieved_results(all_retrieved_results),
                     history_context=history_context
                 )
                 chat_response = await self.highllm.chat_async([{"role": "user", "content": summary_prompt}])
@@ -249,3 +323,11 @@ class DeepSearch(RAGAgent):
     def query(self, query: str, history_context: str = "", collections_names: list = None, use_web_search: bool = False, **kwargs) -> Tuple[str, List[RetrievalResult], int]:
         return asyncio.run(self.async_query(query, history_context, collections_names, use_web_search, **kwargs))
 
+    def _format_retrieved_results(self, retrieved_results: List[RetrievalResult]) -> str:
+        formatted_documents = []
+        for i, result in enumerate(retrieved_results):
+            text = result.metadata.get("wider_text", result.text) if self.text_window_splitter else result.text
+            formatted_documents.append(
+                f"<Document {i}>\nText: {text}\nReference: {json.dumps(result.reference)}\nMetadata: {json.dumps(result.metadata)}\n</Document {i}>"
+            )
+        return "\n".join(formatted_documents)

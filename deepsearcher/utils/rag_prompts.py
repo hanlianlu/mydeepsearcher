@@ -4,6 +4,8 @@ __all__ = [
     "RERANK_PROMPT",
     "REFLECT_PROMPT",
     "SUMMARY_PROMPT",
+    "COLLECTION_ROUTE_PROMPT",
+    "RAG_ROUTER_PROMPT",
 ]
 
 # Prompts (unchanged from original deep searcher agent)-----------------------------------------------------------
@@ -89,3 +91,49 @@ History Contexts:
 {history_context}
 """
 # Prompts (unchanged from original deep searcher agent)-----------------------------------------------------------
+
+# (Collecton Router Agent) Prompt
+
+COLLECTION_ROUTE_PROMPT = """
+You are provided with:
+  - a QUESTION (string)
+  - a COLLECTION_INFO list of dicts, each with keys
+      • collection_name
+      • collection_description
+  - the Current Iteration (“first” or “subsequent”)
+
+Your task:
+1. Identify which collection_name(s) are relevant to answer the QUESTION.
+2. Strictly IGNORE any “Current Iteration” data unless it is “first.”
+
+Rules:
+- If Iteration is “first” AND you find NO relevant collections, you MUST return ALL available collection_name(s).
+- Return ONLY a valid Python list of strings (the selected names), with NO extra commentary.
+
+QUESTION: {question}
+
+COLLECTION_INFO: {collection_info!r}
+
+Current Iteration: {curr_iter_str}
+
+Return your list below:
+"""
+# (RAG Router Agent) Prompt
+
+RAG_ROUTER_PROMPT = """\
+You are given:
+  - A user QUESTION (string)
+  - A numbered list of agent descriptions, each of the form “[1]: description…”
+
+Your job is to pick **exactly one** agent by its **1-based index**, that would best handle the QUESTION.
+
+Return just the index (e.g. “1” or “2”)—no other text.
+
+QUESTION:
+{query}
+
+AGENTS:
+{description_str}
+
+Only reply with the single number (1, 2, or 3).
+"""

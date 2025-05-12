@@ -1,6 +1,5 @@
 import os
 from typing import Dict, Any, Literal
-import yaml
 import logging
 from deepsearcher.vector_db.base import BaseVectorDB
 from deepsearcher.agent import ChainOfRAG, DeepSearch, NaiveRAG, WebSearchAgent
@@ -10,6 +9,7 @@ from deepsearcher.llm.base import BaseLLM
 from deepsearcher.loader.file_loader.base import BaseLoader
 from deepsearcher.loader.web_crawler.base import BaseCrawler
 from deepsearcher.webservice.base import BaseSearchService
+import yaml
 from dotenv import load_dotenv
 
 # Configure logging
@@ -193,9 +193,10 @@ default_searcher = None
 naive_rag = None
 search_service: BaseSearchService = None
 web_search_agent: WebSearchAgent = None  # Add global variable for WebSearchAgent
+max_iter: int = 5
 
 def init_config(config: Configuration):
-    global module_factory, llm, backupllm, embedding_model, lightllm, file_loader, vector_db, web_crawler, default_searcher, naive_rag, search_service, web_search_agent, nanollm
+    global module_factory, llm, backupllm, embedding_model, lightllm, file_loader, vector_db, web_crawler, default_searcher, naive_rag, search_service, web_search_agent, nanollm, max_iter
     logger.info("Starting configuration initialization")
     module_factory = ModuleFactory(config)
     try:

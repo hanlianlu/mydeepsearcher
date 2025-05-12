@@ -3,7 +3,21 @@ import json
 from typing import List, Optional, Union
 
 import numpy as np
-from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility, MilvusException
+try:
+    from pymilvus import connections, Collection, FieldSchema, CollectionSchema, DataType, utility, MilvusException
+except Exception:
+    # Stub out pymilvus if it isn’t available or misconfigured
+    class MilvusException(Exception):
+        """Dummy exception when pymilvus import fails."""
+        pass
+
+    connections = None
+    Collection = type("Collection", (), {})
+    FieldSchema = type("FieldSchema", (), {})
+    CollectionSchema = type("CollectionSchema", (), {})
+    DataType = None
+    utility = None
+
 from deepsearcher.tools import log
 from deepsearcher.loader.splitter import Chunk
 from deepsearcher.vector_db.base import BaseVectorDB, CollectionInfo, RetrievalResult

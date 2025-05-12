@@ -57,3 +57,23 @@ def confidence_prompt(original_query, sub_queries, chunk_str):
         f"Retrieved Chunks: {chunk_str}\n\n"
         "Respond with a single number with double decimal precision between 0.00 and 1.00."
     )
+
+
+def deduplicate_results(results: List[RetrievalResult]) -> List[RetrievalResult]:
+    all_text_set = set()
+    deduplicated_results = []
+    for result in results:
+        if result.text not in all_text_set:
+            all_text_set.add(result.text)
+            deduplicated_results.append(result)
+    return deduplicated_results
+
+# New utility function to deduplicate results with scores
+def deduplicate_results_with_scores(results_with_scores: List[Tuple[RetrievalResult, float]]) -> List[Tuple[RetrievalResult, float]]:
+    seen_texts = set()
+    deduplicated = []
+    for result, score in results_with_scores:
+        if result.text not in seen_texts:
+            seen_texts.add(result.text)
+            deduplicated.append((result, score))
+    return deduplicated
