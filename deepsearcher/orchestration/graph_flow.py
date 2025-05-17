@@ -48,7 +48,7 @@ def build_flow( default_cfg: dict | None = None) -> GraphFlow:
         chain_agent.__description__,
     ]
 
-    rag_router = build_router(cfg.llm_client, descriptions)
+    rag_router = build_router(cfg.model_client, descriptions)
 
     # --- GraphFlow skeleton ---------------------------------------------------
     flow = GraphFlow([rag_router, deep_agent, naive_agent, chain_agent])

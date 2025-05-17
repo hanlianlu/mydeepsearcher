@@ -145,3 +145,28 @@ Previous Sub Queries: {sub_queries}
 Retrieved Chunks: {chunk_str}
 Respond ONLY with a single number with double decimal precision between 0.00 and 1.00.
 """
+
+
+# Prompt templates for ChainOfRAG agents
+
+COR_INTERMEDIATE_PROMPT = """Given the following documents, generate an appropriate answer for the query. DO NOT hallucinate any information, only use the provided documents to generate the answer. Respond "No relevant information found" if the documents do not contain useful information.
+
+## Documents
+{retrieved_documents}
+
+## Query
+{sub_query}
+
+Respond with a concise answer only, do not explain yourself or output anything else.
+"""
+
+COR_REFLECT_PROMPT = """Given the following intermediate queries and answers, estimate your confidence (as a number between 0 and 1) that you have enough information to answer the main query.
+
+## Intermediate queries and answers
+{intermediate_context}
+
+## Main query
+{query}
+
+Respond with a single number with double decimal precision between 0.00 and 1.00 only.
+"""
