@@ -1,74 +1,102 @@
-"""
-Chain-of-RAG flow – Autogen 0.5.7
-Decompose → Retrieve → WebSearch* → Rerank → Reflect(loop) → Summarize
-"""
+# deepsearcher/pipelines/chainofrag_flow.py
+# ---------------------------------------------------------------------------
+# Chain-of-RAG flow – AutoGen v0.5.7
+# Steps:
+#   1. Decompose → 2. Retrieve → 3. (WebSearch*) → 4. (Rerank*) 
+#   → 5. IntermediateAnswer → 6. Followup → 7. Confidence → 8. FinalAnswer
+# ---------------------------------------------------------------------------
+
 from autogen_agentchat.teams import DiGraphBuilder, GraphFlow
 
-from deepsearcher.agents.decomposer_agent import DecomposerAgent
-from deepsearcher.agents.retrieval_agent import RetrievalAgent
-from deepsearcher.agents.web_search_agent import build as build_web
-from deepsearcher.agents.reranker_agent import RerankerAgent
-from deepsearcher.agents.reflection_agent import ReflectionAgent
-from deepsearcher.agents.summarizer_agent import SummarizerAgent
+# Agent factories (each ends in build(cfg))
+from deepsearcher.agents.decomposer_agent          import build as build_decomposer
+from deepsearcher.agents.retrieval_agent          import build as build_retrieval
+from deepsearcher.agents.web_search_agent         import build as build_websearch
+from deepsearcher.agents.reranker_agent           import build as build_reranker
+from deepsearcher.agents.intermediate_answer_agent import build as build_intermediate
+from deepsearcher.agents.followup_agent           import build as build_followup
+from deepsearcher.agents.cor_confidence_agent         import build as build_confidence
+from deepsearcher.agents.cor_summarizer_agent       import build as build_final_answer
 
-# Condition functions for edge transitions
-def has_new_queries(msg):
-    """Check if the message content has new queries."""
-    return bool(msg.content.get("new_queries"))
 
-def no_new_queries(msg):
-    """Check if the message content has no new queries."""
-    return not msg.content.get("new_queries")
+def build(ctx, use_web: bool = False, use_rerank: bool = False) -> GraphFlow:
+    """
+    Build a Chain-of-RAG GraphFlow with precise monolith-style steps:
 
-# Factory
-def build(ctx, use_web: bool = False) -> GraphFlow:
-    """Build and return a Chain-of-RAG GraphFlow with optional web search.
+      1. Decompose
+      2. Retrieve
+      3. Optional WebSearch
+      4. Optional Rerank
+      5. IntermediateAnswer (per sub-query)
+      6. Followup (generate new sub-queries)
+      7. Confidence (early-stop check)
+      8. FinalAnswer (two-section Markdown)
 
     Args:
-        ctx: Runtime context containing LLM client, vector DB, etc.
-        use_web: Whether to include web search in the flow.
+      ctx:         Runtime context (llm_client, vector_db, embedding_model, config, etc.)
+      use_web:     If True, include the WebSearch step after Retrieval.
+      use_rerank:  If True, include the Reranker step after (WebSearch or Retrieval).
 
     Returns:
-        Configured GraphFlow instance.
+      Configured GraphFlow.
     """
-    # Initialize agents with context parameters
-    dec = DecomposerAgent(ctx.llm_client)
-    ret = RetrievalAgent(
-        vector_db=ctx.vector_db,
-        embed_model=ctx.embedding_model,
-        top_k=9,
-    )
-    rer = RerankerAgent(ctx.llm_client)
-    refl = ReflectionAgent(
-        ctx.llm_client,
-        max_iter=ctx.config.query_settings.get("max_iter", 6),
-        confidence_threshold=0.92,
-    )
-    summ = SummarizerAgent(ctx.llm_client)
 
-    # Build the directed graph
-    b = DiGraphBuilder()
-    for agent in (dec, ret, rer, refl, summ):
-        b.add_node(agent)
+    # 1️⃣ Instantiate each agent via its build(cfg)
+    dec         = build_decomposer(ctx)
+    ret         = build_retrieval(ctx)
+    web         = build_websearch(ctx)    if use_web   else None
+    rer         = build_reranker(ctx)     if use_rerank else None
+    inter_ans   = build_intermediate(ctx)
+    follow      = build_followup(ctx)
+    confidence  = build_confidence(ctx)
+    final       = build_final_answer(ctx)
 
-    # Define the flow sequence
-    b.add_edge(dec, ret)
-    if use_web:
-        web = build_web(ctx)
-        b.add_node(web)
-        b.add_edge(ret, web)
-        b.add_edge(web, rer)
-    else:
-        b.add_edge(ret, rer)
+    # 2️⃣ Early-stop threshold from your config (monolith uses ~0.91 by default)
+    threshold = ctx.config.query_settings.get("confidence_threshold", 0.91)
 
-    b.add_edge(rer, refl)
-    # Note: Ensure ReflectionAgent sets "new_queries" in msg.content
-    b.add_edge(refl, ret, condition=has_new_queries)  # Loop back if new queries
-    b.add_edge(refl, summ, condition=no_new_queries)  # Finish if no new queries
+    def low_confidence(msg):
+        return msg.content.get("confidence", 0.0) < threshold
 
-    # Build and return the GraphFlow
-    graph = b.build()
-    participants = [dec, ret, rer, refl, summ]
-    if use_web:
-        participants.append(web)
+    def high_confidence(msg):
+        return msg.content.get("confidence", 0.0) >= threshold
+
+    # 3️⃣ Build the directed graph
+    builder = DiGraphBuilder()
+
+    # Add every node
+    builder.add_node(dec)
+    builder.add_node(ret)
+    if web:        builder.add_node(web)
+    if rer:        builder.add_node(rer)
+    builder.add_node(inter_ans)
+    builder.add_node(follow)
+    builder.add_node(confidence)
+    builder.add_node(final)
+
+    # Edges: Decompose → Retrieve
+    builder.add_edge(dec, ret)
+
+    # Retrieve → [WebSearch →] [Rerank →] IntermediateAnswer
+    prev = ret
+    if web:
+        builder.add_edge(prev, web); prev = web
+    if rer:
+        builder.add_edge(prev, rer); prev = rer
+    builder.add_edge(prev, inter_ans)
+
+    # IntermediateAnswer → Followup
+    builder.add_edge(inter_ans, follow)
+
+    # Followup → Confidence → (loop or finish)
+    builder.add_edge(follow, confidence)
+    builder.add_edge(confidence, ret,   condition=low_confidence)  # Loop for more info
+    builder.add_edge(confidence, final, condition=high_confidence) # Done when confident
+
+    # 4️⃣ Final assembly
+    graph = builder.build()
+    participants = [dec, ret] \
+                 + ([web] if web else []) \
+                 + ([rer] if rer else []) \
+                 + [inter_ans, follow, confidence, final]
+
     return GraphFlow(participants=participants, graph=graph)

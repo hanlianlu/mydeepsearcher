@@ -5,9 +5,9 @@ master graph_flow
 Entry workflow for *mydeepsearcher*:
 
     User → RAGRouterAgent
-           ├─ 0 → DeepSearchAgent  (balanced, all-purpose)
-           ├─ 1 → NaiveRAGAgent    (fast, one-shot)
-           └─ 2 → ChainOfRAGAgent  (precision, multi-hop)
+           ├─ 1 → DeepSearchAgent  (balanced, all-purpose)
+           ├─ 2 → NaiveRAGAgent    (fast, one-shot)
+           └─ 3 → ChainOfRAGAgent  (precision, multi-hop)
 """
 
 from autogen_agentchat.teams  import GraphFlow

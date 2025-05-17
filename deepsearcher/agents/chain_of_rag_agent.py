@@ -1,94 +1,80 @@
-"""
-chainofrag_agent.py
-===================
-
-Single-node wrapper around the monolithic *ChainOfRAG* class.  Keeps the
-legacy behaviour but exposes it as an Autogen AssistantAgent so it can
-be selected by RAGRouter or called directly.
-"""
 from __future__ import annotations
-from typing import Any, List, Dict
+from typing import Any, List, Optional, Union
 
-from autogen_agentchat.agents   import AssistantAgent
+from autogen_agentchat.agents import AssistantAgent
 from autogen_agentchat.messages import TextMessage as Message
-
-from deepsearcher.agent.base     import describe_class
-
+from deepsearcher.agent.base import describe_class
 
 @describe_class(
-    "ChainOfRAG is a specialized, precision-focused agent, ideal for queries that demand laser-like accuracy and multi-step reasoning. "
-    "It dynamically adapts to gaps in information, crafting reactive subqueries to uncover hidden connections and deliver structured, citation-rich answers. "
-    "While not the first choice for broad exploration, it shines in scenarios where precision, transparency, and factual rigor are paramount. "
-    "It is NOT suitable for queries requiring critical thinking, comparative studies or long thesis/reports."
+    "Chain-of-RAG is a hybrid agent: it first delegates to the monolithic implementation, "
+    "and if the monolith signals low confidence, it falls back to a micro-level loop."
 )
 class ChainOfRAGAgent(AssistantAgent):
-    """
-    Wrapper: delegates all heavy work to the legacy ChainOfRAG.monolith.
-
-    • Lazy-imports ChainOfRAG to avoid circular imports.
-    • .run(task) accepts either raw str or TextMessage.
-    """
+    """AutoGen-compatible wrapper for the monolithic Chain-of-RAG, with optional micro-flow fallback."""
 
     def __init__(
         self,
         *,
-        llm,
-        lightllm,
-        highllm,
-        embedding_model,
-        vector_db,
+        llm: Any,
+        lightllm: Any,
+        highllm: Any,
+        embedding_model: Any,
+        vector_db: Any,
         max_iter: int = 5,
-        name: str = "chainofrag",
+        monolith_conf_tag: str = "FALLBACK:",
+        enable_micro: bool = False,
+        name: str = "chain_of_rag",
     ):
-        # The wrapper itself never chats → model_client=None
+        # We don't chat directly; the monolith handles all RAG logic
         super().__init__(name=name, model_client=None)
+        self._llm = llm
+        self._lightllm = lightllm
+        self._highllm = highllm
+        self._embed = embedding_model
+        self._vectordb = vector_db
+        self._max_iter = max_iter
+        self._conf_tag = monolith_conf_tag
+        self._enable_micro = enable_micro
+        self._internal: Optional[Any] = None  # lazy monolith instance
 
-        self._llm            = llm
-        self._lightllm       = lightllm
-        self._highllm        = highllm
-        self._embed          = embedding_model
-        self._vectordb       = vector_db
-        self._max_iter       = max_iter
-        self._internal       = None   # lazy ChainOfRAG instance
-
-    # ------------------------------------------------------------------ #
-    # task-driven entry
-    # ------------------------------------------------------------------ #
-    async def run(
-        self,
-        task: str | Message,
-        **query_kwargs,
-    ) -> Message:
+    async def run(self, task: Union[str, Message], **kwargs) -> Message:
         query = task.content if isinstance(task, Message) else task
 
-        # lazy import
+        # Lazy-load the monolithic ChainOfRAG
         if self._internal is None:
-            from deepsearcher.agent.chain_of_rag import ChainOfRAG
+            from deepsearcher.agent.chain_of_rag import ChainOfRAG  # monolith entrypoint
             self._internal = ChainOfRAG(
-                llm             = self._llm,
-                lightllm        = self._lightllm,
-                highllm         = self._highllm,
-                embedding_model = self._embed,
-                vector_db       = self._vectordb,
-                max_iter        = self._max_iter,
+                llm=self._llm,
+                lightllm=self._lightllm,
+                highllm=self._highllm,
+                embedding_model=self._embed,
+                vector_db=self._vectordb,
+                max_iter=self._max_iter,
             )
 
-        answer, *_ = await self._internal.async_query(query, **query_kwargs)
-        return Message(role="assistant", content=answer)
+        # Delegate to monolith
+        answer, *rest = await self._internal.async_query(query, **kwargs)
+        # If monolith did NOT flag low confidence, return its full answer
+        if not (self._enable_micro and answer.startswith(self._conf_tag)):
+            return Message(role="assistant", content=answer)
+
+        # Otherwise, strip the tag and use micro-flow (commented until ready)
+        cleaned = answer[len(self._conf_tag):].lstrip()
+        # from deepsearcher.pipelines.chainofrag_flow import build_flow
+        # flow = build_flow(ctx=kwargs.get("ctx"))
+        # micro_msg = flow.run(task=cleaned)
+        # return micro_msg
+
+        return Message(role="assistant", content=cleaned)
 
 
-# ---------------------------------------------------------------------- #
-# factory shortcut
-# ---------------------------------------------------------------------- #
 def build(cfg) -> ChainOfRAGAgent:
-    """
-    cfg  : RuntimeContext holding llm, lightllm, highllm, embedding_model, vector_db.
-    """
+    """Factory for ChainOfRAGAgent, used by RAGRouter pipeline registry."""
     return ChainOfRAGAgent(
-        llm             = cfg.llm_client,
-        lightllm        = getattr(cfg, "lightllm", cfg.llm_client),
-        highllm         = getattr(cfg, "highllm", cfg.llm_client),
-        embedding_model = cfg.embedding_model,
-        vector_db       = cfg.vector_db,
-        max_iter        = cfg.config.query_settings.get("max_iter", 5),
+        llm=cfg.llm_client,
+        lightllm=getattr(cfg, "lightllm", cfg.llm_client),
+        highllm=getattr(cfg, "highllm", cfg.llm_client),
+        embedding_model=cfg.embedding_model,
+        vector_db=cfg.vector_db,
+        max_iter=cfg.config.query_settings.get("max_iter", 5),
     )

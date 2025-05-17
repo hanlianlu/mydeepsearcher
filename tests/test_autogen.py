@@ -4,9 +4,9 @@ from typing import Dict, Any
 
 from autogen_agentchat.messages import TextMessage
 from deepsearcher.configuration import Configuration, init_config
-from deepsearcher.pipelines.deepsearcher_flow import build_deepsearcher_flow
-from deepsearcher.pipelines.chainofrag_flow import build_chainofrag_flow
-from deepsearcher.pipelines.naiverag_flow import build_naiverag_flow
+from deepsearcher.pipelines.deepsearcher_flow import build as build_deepsearcher_flow
+from deepsearcher.pipelines.chainofrag_flow import build as build_chainofrag_flow
+from deepsearcher.pipelines.naiverag_flow import build as  build_naiverag_flow
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger("micro-flow-test")

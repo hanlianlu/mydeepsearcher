@@ -110,3 +110,17 @@ class RetrievalAgent(AssistantAgent):
             for i, h in enumerate(hits)
         ]
         return preview, hits
+
+
+# ----------------------------------------------------------------------
+# Factory
+# ----------------------------------------------------------------------
+
+def build(cfg) -> RetrievalAgent:
+    """Factory for pipeline registry (mirrors build() pattern in other agents)."""
+    return RetrievalAgent(
+        vector_db   = cfg.vector_db,
+        embed_model = cfg.embedding_model,
+        top_k       = cfg.config.query_settings.get("top_k", 9),
+        name        = getattr(cfg, "agent_name", "retriever"),
+    )
