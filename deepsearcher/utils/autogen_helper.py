@@ -12,8 +12,8 @@ def kw_for_assistant_agent() -> Optional[str]:
     """
     sig = signature(AssistantAgent.__init__)
 
-    # Preferred explicit names in 0.5.5–0.5.7
-    for cand in ("model_config", "llm_config", "config"):  # check common names
+    # Preferred explicit names in Autogen 0.5.7
+    for cand in ("model_config", "llm_config", "config"):
         if cand in sig.parameters:
             return cand
 
@@ -22,7 +22,7 @@ def kw_for_assistant_agent() -> Optional[str]:
         if name.endswith("_config"):
             return name
 
-    return None  # caller must handle absence
+    return None
 
 
 def edge_cond(fn: Callable) -> str:
@@ -49,41 +49,32 @@ class AutogenLLMAdapter:
         # Convert Autogen message objects into dicts for chat_async
         converted: List[Dict[str, Any]] = []
         for m in messages:
-            # Already a dict
             if isinstance(m, dict):
                 converted.append(m)
-                continue
-
-            # TextMessage from autogen_agentchat
-            if isinstance(m, TextMessage):
+            elif isinstance(m, TextMessage):
                 converted.append({"role": m.role, "content": m.content})
-                continue
+            else:
+                role = getattr(m, "role", None) or getattr(m, "source", None)
+                content = getattr(m, "content", None)
+                if role is None or content is None:
+                    raise RuntimeError(f"Cannot convert {m!r} to chat format")
+                converted.append({"role": role, "content": content})
 
-            # Fallback: use role/source + content
-            role = getattr(m, "role", None) or getattr(m, "source", None)
-            content = getattr(m, "content", None)
-            if role is None or content is None:
-                raise RuntimeError(f"Cannot convert {m!r} to chat format")
-            converted.append({"role": role, "content": content})
-
-        # Delegate to underlying LLM
         return await self._raw.chat_async(converted, **kwargs)
 
     def stream(self, messages: List[Any], **kwargs) -> AsyncIterator[Any]:
-        # Convert then call stream_chat
         converted: List[Dict[str, Any]] = []
         for m in messages:
             if isinstance(m, dict):
                 converted.append(m)
-                continue
-            if isinstance(m, TextMessage):
+            elif isinstance(m, TextMessage):
                 converted.append({"role": m.role, "content": m.content})
-                continue
-            role = getattr(m, "role", None) or getattr(m, "source", None)
-            content = getattr(m, "content", None)
-            if role is None or content is None:
-                raise RuntimeError(f"Cannot convert {m!r} to chat format")
-            converted.append({"role": role, "content": content})
+            else:
+                role = getattr(m, "role", None) or getattr(m, "source", None)
+                content = getattr(m, "content", None)
+                if role is None or content is None:
+                    raise RuntimeError(f"Cannot convert {m!r} to chat format")
+                converted.append({"role": role, "content": content})
 
         return self._raw.stream_chat(converted, **kwargs)
 
