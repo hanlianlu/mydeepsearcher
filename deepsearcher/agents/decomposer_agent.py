@@ -1,72 +1,78 @@
 # deepsearcher/agents/decomposer_agent.py
-
+from __future__ import annotations
 import ast
-from typing import Any, List, Dict
-from autogen_agentchat.agents import AssistantAgent
+from typing import Any, Dict, List
+
+from autogen_agentchat.agents   import AssistantAgent
+from autogen_agentchat.messages import TextMessage as Message
+
 from deepsearcher.utils.rag_prompts import SUB_QUERY_PROMPT
+from deepsearcher.agent.base        import describe_class
+from deepsearcher.utils.autogen_helper import kw_for_assistant_agent
 
+
+@describe_class(
+    "DecomposerAgent splits complex questions into up to four focused "
+    "sub-queries, improving retrieval recall while keeping each query "
+    "self-contained."
+)
 class DecomposerAgent(AssistantAgent):
-    """
-    Splits a user query into up to 4 focused sub-questions.
-    Overrides run() so that downstream agents receive a real Python list.
-    """
+    def __init__(self, llm_client: Any, *, name: str = "decomposer"):
+        _kw = kw_for_assistant_agent()          # str | None
 
-    def __init__(self, llm_client: Any):
-        super().__init__(
-            name="decomposer",
-            model_client=llm_client,
-            system_message=SUB_QUERY_PROMPT,
-            llm_config={
-                "cache_seed": 42,
-                "temperature": 0.3,     #  splits
-            },
-        )
+        init_kwargs = {
+            "name"        : name,
+            "model_client": llm_client,
+        }
+        # only add the temperature/cache-seed block when a keyword exists
+        if _kw:
+            init_kwargs[_kw] = {"temperature": 0.25, "cache_seed": 42}
 
-    async def run(
+        super().__init__(**init_kwargs)
+
+    async def a_receive(
         self,
-        messages: List[Any],
-        sender: str,
-        config: Dict[str, Any],
-    ) -> List[str]:
-        """
-        messages[0].content    => the raw user question (string)
-        config.get("history_context") => optional history
-        Returns List[str]: the sub-questions.
-        """
-        # 1) Extract inputs
-        original_query   = messages[0].content
-        history_context  = config.get("history_context", "")
+        messages: List[Message],
+        sender:   "AssistantAgent",
+        config:   Dict | None = None,
+    ) -> Message:
+        pay         = messages[-1].content
+        original_q  = pay.get("original_query") or messages[-1].content
+        history     = pay.get("history", "")
 
-        # 2) Render the prompt template
-        prompt_text = SUB_QUERY_PROMPT.format(
-            original_query=original_query,
-            history_context=history_context,
+        prompt = SUB_QUERY_PROMPT.format(
+            original_query  = original_q,
+            history_context = history,
         )
 
-        # 3) Call the LLM
-        chat_resp = await self.model_client.chat_async(
-            [{"role": "user", "content": prompt_text}]
+        llm_reply = await self.model_client.chat_async(
+            [{"role": "user", "content": prompt}]
         )
 
-        # 4) Parse the LLM’s output into a Python list
-        text = chat_resp.content.strip()
+        sub_qs = self._parse_list(llm_reply.content, fallback=[original_q])
+
+        return self.send(
+            content  = {
+                "original_query": original_q,
+                "sub_queries":    sub_qs,
+                "history":        history,
+            },
+            metadata = {"total_tokens": llm_reply.total_tokens},
+            sender   = self,
+        )
+
+    # helper
+    @staticmethod
+    def _parse_list(text: str, fallback: List[str]) -> List[str]:
         try:
-            sub_questions = ast.literal_eval(text)
-            if not isinstance(sub_questions, list):
-                raise ValueError("Not a list")
-            # Ensure every item is a string
-            sub_questions = [str(q).strip() for q in sub_questions]
+            obj = ast.literal_eval(text.strip())
+            if isinstance(obj, list) and all(isinstance(x, str) for x in obj):
+                cleaned = [x.strip() for x in obj]
+                return cleaned if cleaned else fallback
         except Exception:
-            # Fallback: treat the entire query as one sub-question
-            sub_questions = [original_query]
-
-        return sub_questions
+            pass
+        return fallback
 
 
 def build(llm_client: Any) -> DecomposerAgent:
-    """
-    Factory function so you can do:
-      from decomposer_agent import build as build_decomposer
-      decomposer = build_decomposer(cfg.llm_client)
-    """
     return DecomposerAgent(llm_client)

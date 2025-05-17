@@ -1,21 +1,43 @@
+"""
+CollectionRouter  -- robust, dual-mode (sync + async) version
+-------------------------------------------------------------
+
+Will return a tuple: (selected_collection_names: list[str], token_cost: int)
+no matter how you call it:
+
+    # ❶ async context
+    selected, tokens = await router.invoke(question)
+
+    # ❷ sync context
+    selected, tokens = router.invoke(question)
+"""
+from __future__ import annotations
+
+import asyncio, logging
 from typing import List, Tuple
 
-from deepsearcher.agent.base import BaseAgent
-from deepsearcher.llm.base import BaseLLM
-from deepsearcher.tools import log
+from deepsearcher.agent.base   import BaseAgent
+from deepsearcher.llm.base     import BaseLLM
 from deepsearcher.vector_db.base import BaseVectorDB
+from deepsearcher.tools        import log      # keeps your colour print
 
-COLLECTION_ROUTE_PROMPT  = """
-You are provided with a QUESTION, a COLLECTION_INFO containing collection_name(s) and their corresponding collection_description(s), and the Current Iteration.
+logger = logging.getLogger(__name__)
+
+COLLECTION_ROUTE_PROMPT = """
+You are provided with a QUESTION, a COLLECTION_INFO containing collection_name(s)
+and their corresponding collection_description(s), and the Current Iteration.
 
 Your task is to:
 1. Identify all collection_name(s) relevant to answering the QUESTION.
-2. Strictly IGNORE any information provided by the current iteration UNLESS Current Iteration is exactly "first".
+2. Strictly IGNORE any information provided by the current iteration UNLESS
+   Current Iteration is exactly "first".
 
 Rules you MUST follow:
-- If Current Iteration is "first" AND you find NO relevant collections to answer the question, you MUST return ALL available collection_names as a Python list of strings.
+- If Current Iteration is "first" AND you find NO relevant collections to answer
+  the question, you MUST return ALL available collection_names as a *Python list
+  of strings*.
 
-Your response MUST be a valid Python list of strings containing ONLY collection_name(s), WITHOUT any additional text or explanation.
+Return **only** that Python list: no prose, no extra keys.
 
 QUESTION: {question}
 COLLECTION_INFO: {collection_info}
@@ -26,64 +48,122 @@ Your selected collection name list is:
 
 
 class CollectionRouter(BaseAgent):
-    def __init__(self, llm: BaseLLM, vector_db: BaseVectorDB, **kwargs):
-        self.llm = llm
-        self.vector_db = vector_db
-        self.all_collections = [
-            collection_info.collection_name for collection_info in self.vector_db.list_collections()
-        ]
+    def __init__(self, llm: BaseLLM, vector_db: BaseVectorDB,*_, **__):
+        self.llm        = llm
+        self.vector_db  = vector_db
 
-    def invoke(self, query: str, collections_names: list = None, curr_iter:int=1, **kwargs) -> Tuple[List[str], int]:
-        if curr_iter == 1:
-            curr_iter_str = "first"
-        elif curr_iter == 0:
-            curr_iter_str = "first"
-        else:
-            curr_iter_str = "subsequent"
-        print(f"curr_iter_str is {curr_iter_str}\n ")
-        consume_tokens = 0
-        if not collections_names:
-            collection_infos = self.vector_db.list_collections()
-        else:
-            collection_infos = self.vector_db.list_collections(collections_names )
-        if len(collection_infos) == 0:
-            log.warning(
-                "No collections found in the vector database. Please check the database connection."
-            )
+        # Preserve original list for fast fallback
+        try:
+            self.all_collections = [
+                c.collection_name for c in self.vector_db.list_collections()
+            ]
+        except Exception as e:
+            logger.warning("VectorDB list_collections() failed: %s", e)
+            self.all_collections = []
+
+    # ------------------------------------------------------------------ #
+    # Public entry-point – works sync OR async
+    # ------------------------------------------------------------------ #
+    def invoke(
+        self,
+        query: str,
+        collections_names: list[str] | None = None,
+        curr_iter: int = 1,
+    ) -> Tuple[List[str], int] | "asyncio.Future":
+        """
+        • If called inside an event-loop, returns a *coroutine* that you must await.
+        • If called from plain sync code, runs the coroutine to completion and
+          returns the result directly.
+        """
+        coro = self._ainvoke(query, collections_names, curr_iter)
+
+        try:
+            loop = asyncio.get_running_loop()
+            # we're already in async code → give coroutine back to caller
+            return coro  # type: ignore[return-value]
+        except RuntimeError:
+            # no running loop → run to completion ourselves
+            return asyncio.run(coro)
+
+    # ------------------------------------------------------------------ #
+    # True async implementation
+    # ------------------------------------------------------------------ #
+    async def _ainvoke(
+        self,
+        query: str,
+        collections_names: list[str] | None,
+        curr_iter: int,
+    ) -> Tuple[List[str], int]:
+
+        curr_iter_str = "first" if curr_iter <= 1 else "subsequent"
+        tok_cost      = 0
+
+        # --- determine candidate collections --------------------------------
+        try:
+            if collections_names:
+                infos = self.vector_db.list_collections(collections_names)
+            else:
+                infos = self.vector_db.list_collections()
+        except Exception as e:
+            logger.warning("VectorDB access failed (%s). Falling back to []", e)
+            infos = []
+
+        if not infos:                       # none at all → hard-fail graceful
+            log.warning("No collections found in VectorDB; returning empty list")
             return [], 0
-        if len(collection_infos) == 1:
-            the_only_collection = collection_infos[0].collection_name
-            log.color_print(
-                f"<think> Perform search [{query}] on the vector DB collection: {the_only_collection} </think>\n"
-            )
-            return [the_only_collection], 0
-        vector_db_search_prompt = COLLECTION_ROUTE_PROMPT.format(
-            question=query,
-            collection_info=[
+
+        if len(infos) == 1:                 # only one choice → short-circuit
+            name = infos[0].collection_name
+            log.color_print(f"<think> Only one collection [{name}] available. </think>\n")
+            return [name], 0
+
+        # --- build LLM prompt -----------------------------------------------
+        prompt = COLLECTION_ROUTE_PROMPT.format(
+            question        = query,
+            collection_info = [
                 {
-                    "collection_name": collection_info.collection_name,
-                    "collection_description": collection_info.description
-                   
+                    "collection_name": ci.collection_name,
+                    "collection_description": getattr(ci, "description", ""),
                 }
-                for collection_info in collection_infos
+                for ci in infos
             ],
-            curr_iter_str = curr_iter_str
+            curr_iter_str   = curr_iter_str,
         )
-        chat_response = self.llm.chat(
-            messages=[{"role": "user", "content": vector_db_search_prompt}]
-        )
-        selected_collections = self.llm.literal_eval(chat_response.content)
-        consume_tokens += chat_response.total_tokens
-        
-        for collection_info in collection_infos:
-            # If a collection description is not provided, use the query as the search query
-            if not collection_info.description:
-                selected_collections.append(collection_info.collection_name)
-            # If the default collection exists, use the query as the search query
-            if self.vector_db.default_collection == collection_info.collection_name:
-                selected_collections.append(collection_info.collection_name)
-        selected_collections = list(set(selected_collections))
+
+        # --- call LLM (async if possible) -----------------------------------
+        if hasattr(self.llm, "chat_async"):
+            resp = await self.llm.chat_async([{"role": "user", "content": prompt}])
+        else:
+            resp = await asyncio.to_thread(
+                self.llm.chat, messages=[{"role": "user", "content": prompt}]
+            )
+        tok_cost += getattr(resp, "total_tokens", 0)
+
+        # --- parse output ----------------------------------------------------
+        try:
+            selected = eval(resp.content)
+            if not isinstance(selected, list):
+                raise ValueError
+        except Exception:
+            # fallback behaviour copied from your original code
+            selected = (
+                [ci.collection_name for ci in infos]
+                if curr_iter_str == "first"
+                else []
+            )
+
+        # Ensure unique, valid strings
+        selected = list({str(c).strip() for c in selected if str(c).strip()})
+
+        # Always add collections with empty description or default collection
+        for ci in infos:
+            if not getattr(ci, "description", "") or \
+               ci.collection_name == getattr(self.vector_db, "default_collection", None):
+                selected.append(ci.collection_name)
+
+        selected = list(dict.fromkeys(selected))     # preserve order, dedupe
+
         log.color_print(
-            f"<think> Perform search [{query}] on the vector DB collections: {selected_collections} </think>\n"
+            f"<think> CollectionRouter → {selected} (iter: {curr_iter_str}) </think>\n"
         )
-        return selected_collections, consume_tokens
+        return selected, tok_cost

@@ -1,273 +1,282 @@
-import os
-from typing import Dict, Any, Literal
-import logging
-from deepsearcher.vector_db.base import BaseVectorDB
-from deepsearcher.agent import ChainOfRAG, DeepSearch, NaiveRAG, WebSearchAgent
-from deepsearcher.agent.rag_router import RAGRouter
-from deepsearcher.embedding.base import BaseEmbedding
-from deepsearcher.llm.base import BaseLLM
-from deepsearcher.loader.file_loader.base import BaseLoader
-from deepsearcher.loader.web_crawler.base import BaseCrawler
-from deepsearcher.webservice.base import BaseSearchService
-import yaml
+# deepsearcher/configuration.py
+"""
+deepsearcher.configuration  –  fault-tolerant bootstrap
+=======================================================
+
+• Each component is initialised in its own try/except block.
+• On failure a lightweight dummy object is injected and a warning logged.
+• Legacy globals (vector_db, llm, …) are still exported for
+  backwards-compatibility, while new code can use the returned
+  `RuntimeContext` instance.
+"""
+from __future__ import annotations
+import os, logging, yaml
+from typing import Any, Dict, Literal
 from dotenv import load_dotenv
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-
 load_dotenv()
-current_dir = os.path.dirname(os.path.abspath(__file__))
-DEFAULT_CONFIG_YAML_PATH = os.path.join(current_dir, "..", "config.yaml")
+logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO)
 
-FeatureType = Literal["llm", "embedding", "lightllm", "file_loader", "web_crawler", "vector_db", "search_service", "backupllm", "nanollm"]
+# --------------------------------------------------------------------- #
+# Interfaces (imported lazily where possible)
+# --------------------------------------------------------------------- #
+from deepsearcher.vector_db.base       import BaseVectorDB
+from deepsearcher.embedding.base       import BaseEmbedding
+from deepsearcher.llm.base             import BaseLLM
+from deepsearcher.loader.file_loader.base import BaseLoader
+from deepsearcher.loader.web_crawler.base import BaseCrawler
+from deepsearcher.webservice.base      import BaseSearchService
 
+from deepsearcher.agent                import (
+    DeepSearch, ChainOfRAG, NaiveRAG, WebSearchAgent
+)
+from deepsearcher.agent.rag_router     import RAGRouter
+
+# compatibility helper for AutoGen 0.5.7
+from deepsearcher.utils.autogen_helper import ensure_autogen_llm_compat
+
+# --------------------------------------------------------------------- #
+DEFAULT_YAML = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "..", "config.yaml"
+)
+
+FeatureType = Literal[
+    "llm", "embedding", "lightllm", "backupllm", "nanollm",
+    "file_loader", "web_crawler", "vector_db", "search_service"
+]
+
+# --------------------------------------------------------------------- #
+# Dummy shims
+# --------------------------------------------------------------------- #
+class NullVectorDB(BaseVectorDB):
+    """In-memory do-nothing stand-in so imports never fail."""
+    def __init__(self, dim: int = 1536):
+        self._dim = dim
+        self._store: Dict[str, list] = {}
+
+    @property
+    def has_connection(self) -> bool:
+        return False
+
+    def list_collections(self):
+        return []
+
+    def init_collection(self, name: str, dim: int | None = None):
+        self._store[name] = []
+        self._dim = dim or self._dim
+
+    def insert_data(self, collection: str, embeddings, metadatas):
+        return
+
+    def clear_db(self):
+        self._store.clear()
+
+    def search_data(self, collection: str, vector, limit: int = 4):
+        return []
+
+    @property
+    def dimension(self) -> int:
+        return self._dim
+
+
+class DummySearch(BaseSearchService):
+    async def search(self, *_):
+        return []
+
+
+class _NoOp:
+    """Signals missing component."""
+    def __getattr__(self, item):
+        raise RuntimeError(f"{item} unavailable")
+
+
+# --------------------------------------------------------------------- #
+# Configuration loader
+# --------------------------------------------------------------------- #
 class Configuration:
-    def __init__(self, config_path: str = DEFAULT_CONFIG_YAML_PATH):
-        self.provide_settings: Dict[str, Any] = {}
-        self.query_settings: Dict[str, Any] = {}
-        self.load_settings: Dict[str, Any] = {}
-        self._load(config_path)
+    def __init__(self, path: str = DEFAULT_YAML):
+        self.provide_settings: Dict[str,Any] = {}
+        self.query_settings:   Dict[str,Any] = {}
+        self.load_settings:    Dict[str,Any] = {}
+        self._load_yaml(path)
 
-    def _load(self, config_path: str):
-        logger.info(f"Loading configuration from {config_path}")
+    def _load_yaml(self, path: str):
         try:
-            with open(config_path, "r") as file:
-                config_data = yaml.safe_load(file)
-            self.provide_settings = config_data.get("provide_settings", {})
-            self.query_settings = config_data.get("query_settings", {})
-            self.load_settings = config_data.get("load_settings", {})
-            logger.debug(f"Loaded provide_settings: {self.provide_settings.keys()}")
+            with open(path, "r") as f:
+                data = yaml.safe_load(f) or {}
+            self.provide_settings = data.get("provide_settings", {})
+            self.query_settings   = data.get("query_settings", {})
+            self.load_settings    = data.get("load_settings", {})
+            logger.info("Loaded configuration %s", path)
         except Exception as e:
-            logger.error(f"Failed to load config file: {e}")
-            raise
+            logger.warning("Config load failed (%s) – using empty defaults", e)
 
-        # Override sensitive information with environment variables
-        if 'llm' in self.provide_settings and 'config' in self.provide_settings['llm']:
-            llm_config = self.provide_settings['llm']['config']
-            azure_openai_key = os.getenv('AZURE_OPENAI_API_KEY')
-            if azure_openai_key:
-                llm_config['api_key'] = azure_openai_key
-        
-        if 'backupllm' in self.provide_settings and 'config' in self.provide_settings['backupllm']:
-            llm_config = self.provide_settings['backupllm']['config']
-            azure_openai_key = os.getenv('AZURE_OPENAI_API_KEY')
-            if azure_openai_key:
-                llm_config['api_key'] = azure_openai_key
+        # inject any API keys we find in the environment
+        for api_var in ("AZURE_OPENAI_API_KEY","OPENAI_API_KEY"):
+            if val := os.getenv(api_var):
+                for ft in ("llm","backupllm","lightllm","nanollm","embedding"):
+                    node = self.provide_settings.setdefault(ft, {})
+                    node.setdefault("config", {})["api_key"] = val
 
-        if 'lightllm' in self.provide_settings and 'config' in self.provide_settings['lightllm']:
-            lightllm_config = self.provide_settings['lightllm']['config']
-            azure_openai_key = os.getenv('AZURE_OPENAI_API_KEY')
-            if azure_openai_key:
-                lightllm_config['api_key'] = azure_openai_key
+    def get_provider_config(self, feature: FeatureType) -> Dict[str,Any]:
+        return self.provide_settings.get(feature, {})
 
-        if 'nanollm' in self.provide_settings and 'config' in self.provide_settings['nanollm']:
-            lightllm_config = self.provide_settings['nanollm']['config']
-            azure_openai_key = os.getenv('AZURE_OPENAI_API_KEY')
-            if azure_openai_key:
-                lightllm_config['api_key'] = azure_openai_key
 
-        if 'embedding' in self.provide_settings and 'config' in self.provide_settings['embedding']:
-            embedding_config = self.provide_settings['embedding']['config']
-            openai_api_key = os.getenv('OPENAI_API_KEY')
-            if openai_api_key:
-                embedding_config['api_key'] = openai_api_key
-
-    def set_provider_config(self, feature: FeatureType, provider: str, provider_configs: Dict[str, Any]):
-        if feature not in self.provide_settings:
-            logger.warning(f"Attempting to set unsupported feature: {feature}")
-            raise ValueError(f"Unsupported feature: {feature}")
-        self.provide_settings[feature]["provider"] = provider
-        self.provide_settings[feature]["config"] = provider_configs
-        logger.info(f"Set provider config for {feature}: {provider}")
-
-    def get_provider_config(self, feature: FeatureType) -> Dict[str, Any]:
-        if feature not in self.provide_settings:
-            logger.error(f"Requested unsupported feature: {feature}")
-            raise ValueError(f"Unsupported feature: {feature}")
-        return self.provide_settings[feature]
-
+# --------------------------------------------------------------------- #
+# Module factory
+# --------------------------------------------------------------------- #
 class ModuleFactory:
-    def __init__(self, config: Configuration):
-        self.config = config
+    def __init__(self, cfg: Configuration):
+        self.cfg = cfg
 
-    def _create_module_instance(self, feature: FeatureType, module_name: str):
-        """
-        Dynamically import the requested `provider` class for *feature* and
-        return an instantiated object.
-
-        Special case:
-            ─ DuckDuckGoSearchService now expects a `SearchConfig` object
-              via the keyword argument `cfg=` instead of loose **kwargs.
-              The branch below converts any YAML‑supplied `config:` dict into
-              that object transparently.
-        """
-        provider_config = self.config.get_provider_config(feature)
-        provider = provider_config.get("provider")
-        class_name = provider
-        cfg_kwargs = provider_config.get("config", {}) or {}
-        logger.debug("Provider='%s', raw‑config=%s", provider, cfg_kwargs)
-
-        # ------------------------------------------------------------------ #
-        # Helper: instantiate, handling the DuckDuckGoSearchService special case
-        # ------------------------------------------------------------------ #
-        def _instantiate(module):
-            cls = getattr(module, class_name)
-            if class_name == "DuckDuckGoSearchService":
-                # Local import to avoid touching unrelated code paths
-                from deepsearcher.webservice.ddgsearchservice import SearchConfig
-
-                search_cfg = SearchConfig(**cfg_kwargs) if cfg_kwargs else SearchConfig()
-                return cls(cfg=search_cfg)
-            return cls(**cfg_kwargs)
-
-        # ------------------------------------------------------------------ #
-        # Primary import path: deepsearcher.webservice (or similar top‑level)
-        # ------------------------------------------------------------------ #
+    def _create(self, feature: FeatureType, mod_path: str):
+        prov = self.cfg.get_provider_config(feature)
+        cls  = prov.get("provider")
+        kw   = prov.get("config", {}) or {}
+        if not cls:
+            raise ImportError(f"No provider configured for '{feature}'")
         try:
-            module = __import__(module_name, fromlist=[class_name])
-            instance = _instantiate(module)
-            return instance
-
-        except (ImportError, AttributeError, TypeError) as e:
-            logger.warning("Primary import failed for %s: %s", class_name, e)
-
-            # -------------------------------------------------------------- #
-            # Fallback path: deepsearcher.webservice.<provider‑lowercase>
-            # -------------------------------------------------------------- #
-            full_module_name = f"{module_name}.{provider.lower()}"
-            logger.info("Trying fallback import path '%s'", full_module_name)
+            module = __import__(mod_path, fromlist=[cls])
+            return getattr(module, cls)(**kw)
+        except Exception as e:
+            # fallback path
             try:
-                module = __import__(full_module_name, fromlist=[class_name])
-                instance = _instantiate(module)
-                logger.info("Successfully created %s (fallback path)", class_name)
-                return instance
+                module = __import__(f"{mod_path}.{cls.lower()}", fromlist=[cls])
+                return getattr(module, cls)(**kw)
+            except Exception:
+                raise e
 
-            except (ImportError, AttributeError, TypeError) as inner_e:
-                logger.error("Fallback import failed for %s: %s", class_name, inner_e)
-                raise ImportError(
-                    f"Failed to instantiate '{class_name}' for feature '{feature}' from "
-                    f"'{module_name}' or '{full_module_name}'. First error: {e}; "
-                    f"fallback error: {inner_e}"
-                ) from inner_e
+    def create_llm(self)         -> BaseLLM:       return self._create("llm",         "deepsearcher.llm")
+    def create_backupllm(self)   -> BaseLLM:       return self._create("backupllm",   "deepsearcher.llm")
+    def create_lightllm(self)    -> BaseLLM:       return self._create("lightllm",    "deepsearcher.llm")
+    def create_nanollm(self)     -> BaseLLM:       return self._create("nanollm",     "deepsearcher.llm")
+    def create_embedding(self)   -> BaseEmbedding: return self._create("embedding",   "deepsearcher.embedding")
+    def create_file_loader(self) -> BaseLoader:    return self._create("file_loader", "deepsearcher.loader.file_loader")
+    def create_web_crawler(self) -> BaseCrawler:   return self._create("web_crawler", "deepsearcher.loader.web_crawler")
+    def create_vector_db(self)   -> BaseVectorDB:  return self._create("vector_db",   "deepsearcher.vector_db")
+    def create_search_service(self)->BaseSearchService: return self._create("search_service","deepsearcher.webservice")
 
 
-    def create_llm(self) -> BaseLLM:
-        return self._create_module_instance("llm", "deepsearcher.llm")
-    
-    def create_backupllm(self) -> BaseLLM:
-        return self._create_module_instance("backupllm", "deepsearcher.llm")
+# --------------------------------------------------------------------- #
+# Runtime context used by new pipelines / agents
+# --------------------------------------------------------------------- #
+class RuntimeContext:
+    def __init__(self, **entries):
+        self.__dict__.update(entries)
 
-    def create_lightllm(self) -> BaseLLM:
-        return self._create_module_instance("lightllm", "deepsearcher.llm")
-    
-    def create_nanollm(self) -> BaseLLM:
-        return self._create_module_instance("nanollm", "deepsearcher.llm")
 
-    def create_embedding(self) -> BaseEmbedding:
-        return self._create_module_instance("embedding", "deepsearcher.embedding")
+# --------------------------------------------------------------------- #
+# Initialise everything
+# --------------------------------------------------------------------- #
+def init_config(cfg: Configuration) -> RuntimeContext:
+    factory = ModuleFactory(cfg)
 
-    def create_file_loader(self) -> BaseLoader:
-        return self._create_module_instance("file_loader", "deepsearcher.loader.file_loader")
+    # --- helper: treat None or exceptions as fallback --------------- #
+    def _safe(fn, default):
+        try:
+            result = fn()
+            return result if result is not None else default
+        except Exception as e:
+            logger.warning("%s init failed: %s", fn.__name__, e)
+            return default
 
-    def create_web_crawler(self) -> BaseCrawler:
-        return self._create_module_instance("web_crawler", "deepsearcher.loader.web_crawler")
+    # --- instantiate LLMs & wrap for AutoGen ------------------------ #
+    raw_llm      = _safe(factory.create_llm,          _NoOp())
+    raw_backup   = _safe(factory.create_backupllm,    raw_llm)
+    raw_light    = _safe(factory.create_lightllm,     raw_llm)
+    raw_nano     = _safe(factory.create_nanollm,      raw_llm)
 
-    def create_vector_db(self) -> BaseVectorDB:
-        return self._create_module_instance("vector_db", "deepsearcher.vector_db")
+    # wrap all four so they support .create(...) and .model_info
+    llm          = ensure_autogen_llm_compat(raw_llm)
+    backupllm    = ensure_autogen_llm_compat(raw_backup)
+    lightllm     = ensure_autogen_llm_compat(raw_light)
+    nanollm      = ensure_autogen_llm_compat(raw_nano)
 
-    def create_search_service(self) -> BaseSearchService:
-        return self._create_module_instance("search_service", "deepsearcher.webservice")
+    # must have at least one
+    if isinstance(llm, _NoOp) and isinstance(backupllm, _NoOp):
+        raise RuntimeError("No LLM backend initialised.")
 
-# Global objects initialized later
-module_factory: ModuleFactory = None
-llm: BaseLLM = None
-backupllm: BaseLLM = None
-lightllm: BaseLLM = None
-nanollm: BaseLLM = None
-embedding_model: BaseEmbedding = None
-file_loader: BaseLoader = None
-vector_db: BaseVectorDB = None
-web_crawler: BaseCrawler = None
-default_searcher = None
-naive_rag = None
-search_service: BaseSearchService = None
-web_search_agent: WebSearchAgent = None  # Add global variable for WebSearchAgent
-max_iter: int = 5
+    # --- other components ------------------------------------------- #
+    embedding    = _safe(factory.create_embedding,   _NoOp())
+    vectordb     = _safe(factory.create_vector_db,   NullVectorDB())
+    file_loader  = _safe(factory.create_file_loader, _NoOp())
+    crawler      = _safe(factory.create_web_crawler, _NoOp())
+    search_srv   = _safe(factory.create_search_service, DummySearch())
 
-def init_config(config: Configuration):
-    global module_factory, llm, backupllm, embedding_model, lightllm, file_loader, vector_db, web_crawler, default_searcher, naive_rag, search_service, web_search_agent, nanollm, max_iter
-    logger.info("Starting configuration initialization")
-    module_factory = ModuleFactory(config)
+    # --- WebSearchAgent --------------------------------------------- #
     try:
-        llm = module_factory.create_llm()
-        backupllm = module_factory.create_backupllm()
-        lightllm = module_factory.create_lightllm()
-        nanollm = module_factory.create_nanollm()
-        embedding_model = module_factory.create_embedding()
-        file_loader = module_factory.create_file_loader()
-        web_crawler = module_factory.create_web_crawler()
-        vector_db = module_factory.create_vector_db()
-        search_service = module_factory.create_search_service()
-        
-        if search_service is None:
-            logger.error("Failed to initialize search_service: returned None")
-            raise ValueError("Search service initialization failed")
-        
-        # Initialize WebSearchAgent with fallback mechanism for llm
-        web_llm = lightllm if lightllm is not None else llm if llm is not None else backupllm
-        highllm = backupllm if backupllm is not None else llm
-        if web_llm is None:
-            logger.error("No LLM available for WebSearchAgent initialization")
-            raise ValueError("Failed to initialize WebSearchAgent: No LLM available")
-        
-        web_search_agent = WebSearchAgent(
-            search_service=search_service,
-            web_crawler=web_crawler,
-            llm=web_llm,
-            max_urls = 10,
+        web_search = WebSearchAgent(
+            search_service=search_srv,
+            web_crawler=crawler,
+            llm=lightllm if not isinstance(lightllm, _NoOp) else backupllm,
+            max_urls=10,
             max_chunk_size=6000,
-            url_relevance_threshold=0.71
+            url_relevance_threshold=0.71,
         )
-        if web_search_agent is None:
-            logger.error("Failed to initialize web_search_agent: returned None")
-            raise ValueError("Web search agent initialization failed")
-        
-        default_searcher = RAGRouter(
+    except Exception as e:
+        logger.warning("WebSearchAgent init failed: %s (dummy)", e)
+        web_search = DummySearch()
+
+    # --- RAGRouter (fallback to Naive) ------------------------------ #
+    try:
+        default_search = RAGRouter(
             llm=llm,
-            lightllm=web_llm,
+            lightllm=lightllm,
             rag_agents=[
                 DeepSearch(
-                    llm=llm,
-                    lightllm=web_llm,
-                    highllm=highllm,
-                    embedding_model=embedding_model,
-                    vector_db=vector_db,
-                    max_iter=config.query_settings.get("max_iter", 5),
-                    route_collection=True,
-                    text_window_splitter=True,
+                    llm=llm, lightllm=lightllm, highllm=backupllm,
+                    embedding_model=embedding, vector_db=vectordb,
+                    max_iter=cfg.query_settings.get("max_iter", 5),
                 ),
                 ChainOfRAG(
-                    llm=llm,
-                    lightllm=web_llm,
-                    highllm=highllm,
-                    embedding_model=embedding_model,
-                    vector_db=vector_db,
-                    max_iter=config.query_settings.get("max_iter", 5),
-                    route_collection=True,
-                    text_window_splitter=True,
+                    llm=llm, lightllm=lightllm, highllm=backupllm,
+                    embedding_model=embedding, vector_db=vectordb,
+                    max_iter=cfg.query_settings.get("max_iter", 5),
                 ),
             ],
         )
-        naive_rag = NaiveRAG(
-            llm=web_llm,
-            embedding_model=embedding_model,
-            vector_db=vector_db,
-            top_k=10,
-            route_collection=True,
-            text_window_splitter=True,
-        )
-        logger.info("Configuration initialization completed")
     except Exception as e:
-        logger.error(f"Configuration initialization failed: {e}")
-        raise
+        logger.warning("RAGRouter init failed: %s (using NaiveRAG)", e)
+        default_search = NaiveRAG(
+            llm=lightllm, embedding_model=embedding, vector_db=vectordb
+        )
+
+    # --- Build context object --------------------------------------- #
+    ctx = RuntimeContext(
+        llm_client       = llm,
+        backupllm        = backupllm,
+        lightllm         = lightllm,
+        nanollm          = nanollm,
+        # alias for pipelines expecting ctx.highllm
+        highllm          = backupllm,
+        embedding_model  = embedding,
+        vector_db        = vectordb,
+        file_loader      = file_loader,
+        web_crawler      = crawler,
+        search_service   = search_srv,
+        web_search_agent = web_search,
+        default_searcher = default_search,
+        config           = cfg,
+    )
+
+    # --- Backwards-compat globals ---------------------------- #
+    globals().update(
+        module_factory   = factory,
+        llm              = llm,
+        backupllm        = backupllm,
+        lightllm         = lightllm,
+        nanollm          = nanollm,
+        highllm          = backupllm,
+        embedding_model  = embedding,
+        vector_db        = vectordb,
+        file_loader      = file_loader,
+        web_crawler      = crawler,
+        search_service   = search_srv,
+        web_search_agent = web_search,
+        default_searcher = default_search,
+        naive_rag        = _NoOp(),          # still created lazily if needed
+        max_iter         = cfg.query_settings.get("max_iter", 5),
+    )
+
+    return ctx

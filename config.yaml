@@ -69,6 +69,7 @@ provide_settings:
 
 query_settings:
   max_iter: 5
+  use_web_search: false   # or false
 
 load_settings:
   chunk_size: 3000

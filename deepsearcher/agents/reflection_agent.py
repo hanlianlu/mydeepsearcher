@@ -1,100 +1,120 @@
-# deepsearcher/agents/reflection_agent.py
+"""
+ReflectionAgent
+===============
 
+After each retrieve→rerank pass this agent decides **whether more
+search is needed**.  It examines:
+
+    content = {
+        "original_query": str,
+        "sub_queries":    list[str],     # asked so far
+    }
+
+    metadata["accepted_chunks"] = list[RetrievalResult]  # from RerankerAgent
+
+It returns a message whose `content` is either::
+
+    { "new_queries": list[str] }    # loop again
+or
+    { "new_queries": [] }           # stop & summarise
+"""
+
+from __future__ import annotations
 import ast
-from typing import Any, List
-from autogen_agentchat.agents import AssistantAgent
-from deepsearcher.utils.rag_prompts import REFLECT_PROMPT
-from deepsearcher.utils.rag_helpers import format_retrieved_results
-from deepsearcher.vector_db.base import RetrievalResult
+from typing import Any, Dict, List
+
+from autogen_agentchat.agents   import AssistantAgent
+from autogen_agentchat.messages import TextMessage as Message
+from deepsearcher.utils.rag_prompts  import REFLECT_PROMPT
+from deepsearcher.utils.rag_helpers  import format_retrieved_results
+from deepsearcher.vector_db          import RetrievalResult
 
 
 class ReflectionAgent(AssistantAgent):
-    """
-    Agent that decides whether additional search queries are needed.
 
-    Expects:
-      - messages[0].content == original_query (str)
-      - config['sub_queries'] == List[str] from the decomposer
-      - messages[-1].content is a dict {'accepted': List[RetrievalResult]}
-        or directly a List[RetrievalResult]
-
-    Returns:
-      A Python list of up to max_iter new sub-queries (or [] if none).
-    """
-
-    def __init__(self, llm_client: Any, max_iter: int = 5):
-        super().__init__(
-            name="reflector",
-            model_client=llm_client,
-            system_message=(
-                "Based on the original query, previous sub-queries, and the retrieved chunks, "
-                "determine if more search is needed. "
-                "If so, return a Python list of up to 3 new search queries. "
-                "If no further research is required, return an empty list."
-            ),
-        )
-        self.max_iter = max_iter
-        self._iter_count = 0
-
-    async def run(
+    def __init__(
         self,
-        messages: List[Any],
-        sender: str,
-        config: dict,
-    ) -> List[str]:
-        # Prevent infinite loops
-        if self._iter_count >= self.max_iter:
-            return []
-        self._iter_count += 1
+        llm_client: Any,
+        *,
+        name: str = "reflection",
+        max_iter: int = 5,
+        confidence_threshold: float = 0.94,   # optional second-stage stop
+    ):
+        super().__init__(name=name, model_client=llm_client)
+        self.max_iter = max_iter
+        self.conf_thr = confidence_threshold
+        self._iter_seen: Dict[str, int] = {}   # track per-query loops
 
-        # 1) Original query
-        original_query = messages[0].content
+    # ------------------------------------------------------------------ #
+    # message-driven entry-point
+    # ------------------------------------------------------------------ #
+    async def a_receive(
+        self,
+        messages: List[Message],
+        sender:   "AssistantAgent",
+        config:   Dict | None = None,
+    ) -> Message:
+        pay  = messages[-1].content
+        meta = messages[-1].metadata
 
-        # 2) Sub-queries from config
-        sub_queries: List[str] = config.get("sub_queries", [])
-        
-        # 3) Extract accepted chunks from the previous agent
-        last = messages[-1].content
-        if isinstance(last, dict) and "accepted" in last:
-            accepted: List[RetrievalResult] = last["accepted"]
-        elif isinstance(last, list) and all(isinstance(x, RetrievalResult) for x in last):
-            accepted = last
-        else:
-            accepted = []
+        orig_q: str        = pay.get("original_query", "")
+        sub_qs: List[str]  = pay.get("sub_queries", [])
+        chunks: List[RetrievalResult] = meta.get("accepted_chunks", [])
 
-        # 4) Format into text for the prompt
+        # Loop-control: how many times have we reflected on *this* query?
+        loop_id = orig_q   # could add user id
+        self._iter_seen[loop_id] = self._iter_seen.get(loop_id, 0) + 1
+        if self._iter_seen[loop_id] > self.max_iter:
+            return self._return([], reason="Reached max_iter")
+
+        # Build reflect prompt
         chunk_str = (
-            format_retrieved_results(accepted)
-            if accepted
+            format_retrieved_results(chunks) if chunks
             else "No chunks retrieved."
         )
 
-        # 5) Build and send the reflection prompt
         prompt = REFLECT_PROMPT.format(
-            question=original_query,
-            mini_questions=", ".join(sub_queries),
-            chunk_str=chunk_str,
-        )
-        chat_resp = await self.model_client.chat_async(
-            [{"role": "user", "content": prompt}]
+            question       = orig_q,
+            mini_questions = ", ".join(sub_qs),
+            chunk_str      = chunk_str,
         )
 
-        # 6) Parse the model's output as a Python list
+        llm_resp = await self.model_client.chat_async([{"role": "user", "content": prompt}])
+
+        # Parse → list[str]
         try:
-            gap_queries = ast.literal_eval(chat_resp.content)
+            gap_queries = ast.literal_eval(llm_resp.content)
         except Exception:
             gap_queries = []
 
-        # Ensure it's a list of strings
         if not isinstance(gap_queries, list):
             gap_queries = []
         gap_queries = [str(q).strip() for q in gap_queries if isinstance(q, str)]
 
-        return gap_queries
+        return self._return(gap_queries)
+
+    # ------------------------------------------------------------------ #
+    # helper: package outgoing message
+    # ------------------------------------------------------------------ #
+    def _return(self, new_qs: List[str], *, reason: str | None = None) -> Message:
+        return self.send(
+            content  = {"new_queries": new_qs},
+            metadata = {"reason": reason or ("follow-up" if new_qs else "sufficient")},
+            sender   = self,
+        )
 
 
-def build(llm_client: Any, max_iter: int = 3) -> ReflectionAgent:
-    """
-    Factory: create a ReflectionAgent bound to the given LLM client and iteration cap.
-    """
-    return ReflectionAgent(llm_client, max_iter)
+# ---------------------------------------------------------------------- #
+# factory helper
+# ---------------------------------------------------------------------- #
+def build(
+    llm_client: Any,
+    *,
+    max_iter: int = 5,
+    confidence_threshold: float = 0.94,
+) -> ReflectionAgent:
+    return ReflectionAgent(
+        llm_client,
+        max_iter=max_iter,
+        confidence_threshold=confidence_threshold,
+    )

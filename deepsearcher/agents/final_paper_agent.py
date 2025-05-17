@@ -1,78 +1,94 @@
-# deepsearcher/agents/finalpaper_agent.py
 """
-Wraps the existing FinalPaperAgent monolith as a single GraphFlow participant,
-with lazy import to avoid circular dependencies.
-"""
-from typing import Any, List, Dict
-from autogen_agentchat.agents import AssistantAgent
+finalpaper_agent.py
+===================
 
+A wrapper that turns the legacy *FinalPaperAgent* (monolithic, heavy
+report generator) into a single message-driven node usable in Autogen
+GraphFlows.
+"""
+from __future__ import annotations
+from typing import Any, List, Dict
+
+from autogen_agentchat.agents   import AssistantAgent
+from autogen_agentchat.messages import TextMessage as Message
+
+from deepsearcher.agent.base     import describe_class
+
+
+@describe_class(
+    "FinalPaperAgent writes a comprehensive, thesis-level report.  "
+    "It weaves together retrieved evidence, sub-query reasoning, and "
+    "conversation history into a structured Markdown document suitable "
+    "for deep analytical or executive-level consumption."
+)
 class FinalPaperAgentWrapper(AssistantAgent):
     """
-    Produces a thesis-level report by delegating to the monolithic FinalPaperAgent.
-
-    Inputs:
-      - messages[0].content: the original query (str)
-      - config['retrieved_results']: List[RetrievalResult]
-      - config['sub_queries']: List[str]
-      - config['history_context']: str
-
-    Returns:
-      A comprehensive final answer (str).
+    Message-driven wrapper around *deepsearcher.agent.final_paper.FinalPaperAgent*.
     """
 
     def __init__(
         self,
         lightllm: Any,
-        highllm: Any,
+        highllm:  Any,
+        *,
+        name: str = "finalpaper",
     ):
-        super().__init__(
-            name="finalpaper",
-            model_client=highllm,
-            system_message=(
-                "You are to write a thesis-level report based on retrieved data and context."
-            ),
-        )
-        # Save dependencies, but don't import monolith until run()
-        self.lightllm = lightllm
-        self.highllm = highllm
-        self._internal = None
+        # The wrapper itself does NO LLM chat – delegate to monolith
+        super().__init__(name=name, model_client=None)
 
-    async def run(
+        self._lightllm = lightllm
+        self._highllm  = highllm
+        self._internal = None  # lazy-loaded FinalPaperAgent instance
+
+    # ------------------------------------------------------------------ #
+    # GraphFlow entry-point
+    # ------------------------------------------------------------------ #
+    async def a_receive(
         self,
-        messages: List[Any],
-        sender: str,
-        config: Dict[str, Any],
-    ) -> str:
-        # Lazy import FinalPaperAgent to avoid circular import
+        messages: List[Message],
+        sender:   "AssistantAgent",
+        config:   Dict | None = None,
+    ) -> Message:
+        """
+        Expects latest message.content to carry:
+
+            {
+                "original_query":   str,
+                "sub_queries":      list[str],
+                "chunks":           list[RetrievalResult],
+                "history":          str | "",
+            }
+        """
+        pay = messages[-1].content
+
+        # Lazy import to avoid circulars
         if self._internal is None:
             from deepsearcher.agent.final_paper import FinalPaperAgent
             self._internal = FinalPaperAgent(
-                lightllm=self.lightllm,
-                highllm=self.highllm,
+                lightllm=self._lightllm,
+                highllm =self._highllm,
             )
 
-        # Extract inputs
-        query = messages[0].content
-        retrieved = config.get("retrieved_results", [])
-        sub_queries = config.get("sub_queries", [])
-        history = config.get("history_context", "")
-
-        # Delegate to original monolith's generate_response
-        # Assume generate_response is async
-        final = await self._internal.generate_response(
-            query=query,
-            retrieved_results=retrieved,
-            sub_queries=sub_queries,
-            history_context=history,
+        final_answer = await self._internal.generate_response(
+            query             = pay.get("original_query", ""),
+            retrieved_results = pay.get("chunks", []),
+            sub_queries       = pay.get("sub_queries", []),
+            history_context   = pay.get("history", ""),
         )
-        return final
+
+        return self.send(
+            content  = final_answer,                 # Markdown thesis
+            metadata = {"generator": "FinalPaperAgent"},
+            sender   = self,
+        )
 
 
-def build(
-    lightllm: Any,
-    highllm: Any,
-) -> FinalPaperAgentWrapper:
+# ---------------------------------------------------------------------- #
+# factory helper
+# ---------------------------------------------------------------------- #
+def build(lightllm: Any, highllm: Any) -> FinalPaperAgentWrapper:
     """
-    Factory: returns a FinalPaperAgentWrapper bound to the given LLM clients.
+    Convenience constructor used by pipeline builders after JudgeAgent
+    signals that a long-form report is required.
     """
     return FinalPaperAgentWrapper(lightllm, highllm)

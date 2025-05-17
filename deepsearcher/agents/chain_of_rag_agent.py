@@ -1,90 +1,94 @@
-# deepsearcher/agents/chainofrag_agent.py
 """
-Wraps the existing ChainOfRAG monolith as a single GraphFlow participant,
-with lazy import to avoid circular dependencies.
-"""
-from typing import Any, List, Dict
-from autogen_agentchat.agents import AssistantAgent
+chainofrag_agent.py
+===================
 
+Single-node wrapper around the monolithic *ChainOfRAG* class.  Keeps the
+legacy behaviour but exposes it as an Autogen AssistantAgent so it can
+be selected by RAGRouter or called directly.
+"""
+from __future__ import annotations
+from typing import Any, List, Dict
+
+from autogen_agentchat.agents   import AssistantAgent
+from autogen_agentchat.messages import TextMessage as Message
+
+from deepsearcher.agent.base     import describe_class
+
+
+@describe_class(
+    "ChainOfRAG is a specialized, precision-focused agent, ideal for queries that demand laser-like accuracy and multi-step reasoning. "
+    "It dynamically adapts to gaps in information, crafting reactive subqueries to uncover hidden connections and deliver structured, citation-rich answers. "
+    "While not the first choice for broad exploration, it shines in scenarios where precision, transparency, and factual rigor are paramount. "
+    "It is NOT suitable for queries requiring critical thinking, comparative studies or long thesis/reports."
+)
 class ChainOfRAGAgent(AssistantAgent):
     """
-    Precision-focused RAG pipeline that dynamically crafts and iterates subqueries.
+    Wrapper: delegates all heavy work to the legacy ChainOfRAG.monolith.
 
-    Inputs:
-      - messages[0].content: the original query (str)
-      - config may contain history or other flags if needed
-
-    Returns:
-      The final answer (str) from the ChainOfRAG monolith.
+    • Lazy-imports ChainOfRAG to avoid circular imports.
+    • .run(task) accepts either raw str or TextMessage.
     """
+
     def __init__(
         self,
-        llm: Any,
-        lightllm: Any,
-        highllm: Any,
-        embedding_model: Any,
-        vector_db: Any,
-        max_iter: int,
-    ):
-        super().__init__(
-            name="chainofrag",
-            model_client=highllm,
-            system_message=(
-                "Executing Chain-of-RAG precision pipeline as a single agent."
-            ),
-        )
-        # Save dependencies for lazy instantiation
-        self.llm = llm
-        self.lightllm = lightllm
-        self.highllm = highllm
-        self.embedding_model = embedding_model
-        self.vector_db = vector_db
-        self.max_iter = max_iter
-        self._internal = None
-
-    async def run(
-        self,
-        messages: List[Any],
-        sender: str,
-        config: Dict[str, Any],
-    ) -> str:
-        # Lazy import to avoid circular imports at module load
-        if self._internal is None:
-            from deepsearcher.agent.chain_of_rag import ChainOfRAG
-            self._internal = ChainOfRAG(
-                llm=self.llm,
-                lightllm=self.lightllm,
-                highllm=self.highllm,
-                embedding_model=self.embedding_model,
-                vector_db=self.vector_db,
-                max_iter=self.max_iter,
-            )
-
-        # Delegate to the monolith's query method
-        query = messages[0].content
-        answer, _, _ = self._internal.query(
-            query,
-            **config,
-        )
-        return answer
-
-
-def build(
-    llm: Any,
-    lightllm: Any,
-    highllm: Any,
-    embedding_model: Any,
-    vector_db: Any,
-    max_iter: int,
-) -> ChainOfRAGAgent:
-    """
-    Factory: returns a ChainOfRAGAgent bound to the given dependencies.
-    """
-    return ChainOfRAGAgent(
+        *,
         llm,
         lightllm,
         highllm,
         embedding_model,
         vector_db,
-        max_iter,
+        max_iter: int = 5,
+        name: str = "chainofrag",
+    ):
+        # The wrapper itself never chats → model_client=None
+        super().__init__(name=name, model_client=None)
+
+        self._llm            = llm
+        self._lightllm       = lightllm
+        self._highllm        = highllm
+        self._embed          = embedding_model
+        self._vectordb       = vector_db
+        self._max_iter       = max_iter
+        self._internal       = None   # lazy ChainOfRAG instance
+
+    # ------------------------------------------------------------------ #
+    # task-driven entry
+    # ------------------------------------------------------------------ #
+    async def run(
+        self,
+        task: str | Message,
+        **query_kwargs,
+    ) -> Message:
+        query = task.content if isinstance(task, Message) else task
+
+        # lazy import
+        if self._internal is None:
+            from deepsearcher.agent.chain_of_rag import ChainOfRAG
+            self._internal = ChainOfRAG(
+                llm             = self._llm,
+                lightllm        = self._lightllm,
+                highllm         = self._highllm,
+                embedding_model = self._embed,
+                vector_db       = self._vectordb,
+                max_iter        = self._max_iter,
+            )
+
+        answer, *_ = await self._internal.async_query(query, **query_kwargs)
+        return Message(role="assistant", content=answer)
+
+
+# ---------------------------------------------------------------------- #
+# factory shortcut
+# ---------------------------------------------------------------------- #
+def build(cfg) -> ChainOfRAGAgent:
+    """
+    cfg  : RuntimeContext holding llm, lightllm, highllm, embedding_model, vector_db.
+    """
+    return ChainOfRAGAgent(
+        llm             = cfg.llm_client,
+        lightllm        = getattr(cfg, "lightllm", cfg.llm_client),
+        highllm         = getattr(cfg, "highllm", cfg.llm_client),
+        embedding_model = cfg.embedding_model,
+        vector_db       = cfg.vector_db,
+        max_iter        = cfg.config.query_settings.get("max_iter", 5),
     )

@@ -1,83 +1,117 @@
-# deepsearcher/agents/reranker_agent.py
+"""
+RerankerAgent
+=============
 
-from typing import List, Tuple, Any
+An AssistantAgent that uses an LLM to *filter / score* retrieved chunks.
+
+Input message (from RetrievalAgent or another step) **must** carry:
+
+    content = {
+        "original_query": str,
+        "sub_queries":    list[str],
+    }
+    metadata["tool_output"] = List[RetrievalResult]   # raw hits
+
+Output message:
+
+    content = {
+        "accepted": List[dict],   # preview of accepted chunks
+    }
+    metadata["accepted_chunks"] = List[RetrievalResult]  # full objects
+"""
+
+from __future__ import annotations
+from typing import List, Dict, Any, Tuple
+
 from autogen_agentchat.agents import AssistantAgent
+from autogen_agentchat.messages import TextMessage        # ← replaces “Message”
+
 from deepsearcher.utils.rag_prompts import RERANK_PROMPT
 from deepsearcher.utils.rag_helpers import (
     format_retrieved_results,
     parse_rerank_response,
 )
-from deepsearcher.vector_db.base import RetrievalResult
+from deepsearcher.vector_db import RetrievalResult
+
 
 class RerankerAgent(AssistantAgent):
     """
-    Agent that re-ranks the retrieved document chunks.
-
-    Expects:
-      - messages[0].content == original_query (str)
-      - messages[1].metadata["tool_output"]["raw_results"] == List[RetrievalResult]
-      - config["sub_queries"] == List[str]
-
-    Returns:
-      {"accepted": List[RetrievalResult]}
+    LLM-based reranker / filter step.
     """
 
-    def __init__(self, llm_client: Any):
-        super().__init__(
-            name="reranker",
-            model_client=llm_client,
-            system_message=(
-                "You are a document relevance evaluator. "
-                "You will receive the queries/questions and a list of document candicates. "
-                "Follow user's instructions to filter and score each document candicate."
-            ),
-        )
-
-    async def run(
+    def __init__(
         self,
-        messages: List[Any],
-        sender: str,
-        config: dict,
-    ) -> dict:
-        # 1) Original query
-        original_query = messages[0].content
+        llm_client: Any,
+        *,
+        name: str = "reranker",
+        min_keep_score: float = 0.40,
+    ):
+        super().__init__(name=name, model_client=llm_client)
+        self.min_keep_score = min_keep_score
 
-        # 2) Sub-queries passed along in config
-        sub_queries: List[str] = config.get("sub_queries", [])
+    # ------------------------------------------------------------------ #
+    # Message-driven hook
+    # ------------------------------------------------------------------ #
+    async def a_receive(
+        self,
+        messages: List[TextMessage],
+        sender:   "AssistantAgent",
+        config:   Dict[str, Any] | None = None,
+    ) -> TextMessage:
+        # ---- Extract payload -------------------------------------------------
+        m          = messages[-1]
+        payload    = m.content
+        raw_hits   : List[RetrievalResult] = m.metadata.get("tool_output", [])
 
-        # 3) Raw RetrievalResult list from the retrieval tool
-        tool_msg = messages[1]
-        raw_results: List[RetrievalResult] = (
-            tool_msg.metadata.get("tool_output", {})
-                         .get("raw_results", [])
-        )
+        if not raw_hits:
+            # Nothing to rerank – pass through
+            return self.send(
+                content={"accepted": []},
+                metadata={"accepted_chunks": []},
+                sender=self,
+            )
 
-        # 4) Format for the prompt
-        formatted_chunks = format_retrieved_results(raw_results)
+        original_query: str  = payload.get("original_query", "")
+        sub_queries   : List[str] = payload.get("sub_queries", [])
 
-        # 5) Fill and send the rerank prompt
+        # ---- Prepare and send prompt ----------------------------------------
         prompt = RERANK_PROMPT.format(
-            original_query=original_query,
-            sub_queries=", ".join(sub_queries),
-            retrieved_chunk=formatted_chunks,
-        )
-        chat_resp = await self.model_client.chat_async(
-            [{"role": "user", "content": prompt}]
+            original_query = original_query,
+            sub_queries    = ", ".join(sub_queries),
+            retrieved_chunk= format_retrieved_results(raw_hits),
         )
 
-        # 6) Parse the JSON votes back into (result, score)
-        accepted_with_scores: List[Tuple[RetrievalResult, float]] = parse_rerank_response(
-            raw_results, chat_resp.content
+        llm_resp = await self.model_client.chat_async([{"role": "user", "content": prompt}])
+
+        # ---- Parse JSON response --------------------------------------------
+        accepted_pairs: List[Tuple[RetrievalResult, float]] = parse_rerank_response(
+            raw_hits, llm_resp.content, keep_threshold=self.min_keep_score
+        )
+        accepted_chunks = [c for c, _ in accepted_pairs]
+
+        preview = [
+            {
+                "id": i,
+                "text": c.text[:3000] + ("…" if len(c.text) > 3000 else ""),
+                "score": score,
+            }
+            for i, (c, score) in enumerate(accepted_pairs)
+        ]
+
+        # ---- Return message --------------------------------------------------
+        return self.send(
+            content  = {"accepted": preview},
+            metadata = {"accepted_chunks": accepted_chunks},
+            sender   = self,
         )
 
-        # 7) Keep only the RetrievalResult objects
-        accepted = [chunk for (chunk, _) in accepted_with_scores]
 
-        return {"accepted": accepted}
+# ---------------------------------------------------------------------- #
+# Factory helper
+# ---------------------------------------------------------------------- #
 
-
-def build(llm_client: Any) -> RerankerAgent:
+def build(llm_client: Any, *, min_keep_score: float = 0.40) -> RerankerAgent:
     """
-    Factory to create a RerankerAgent bound to the given LLM client.
+    Convenience constructor used by pipeline builders.
     """
-    return RerankerAgent(llm_client)
+    return RerankerAgent(llm_client, min_keep_score=min_keep_score)

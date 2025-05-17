@@ -120,7 +120,7 @@ Return your list below:
 """
 # (RAG Router Agent) Prompt
 
-RAG_ROUTER_PROMPT = """\
+RAG_ROUTER_PROMPT = """
 You are given:
   - A user QUESTION (string)
   - A numbered list of agent descriptions, each of the form “[1]: description…”
@@ -136,4 +136,12 @@ AGENTS:
 {description_str}
 
 Only reply with the single number (1, 2, or 3).
+"""
+
+CONFIDENCE_PROMPT = """
+Based on the original query, previous sub-queries, and the retrieved chunks, assess your confidence (as a number between 0 and 1) that you have enough information to answer the query comprehensively with profound insights.
+Original Query: {original_query}
+Previous Sub Queries: {sub_queries}
+Retrieved Chunks: {chunk_str}
+Respond ONLY with a single number with double decimal precision between 0.00 and 1.00.
 """
